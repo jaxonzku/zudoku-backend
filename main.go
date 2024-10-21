@@ -138,6 +138,10 @@ func main() {
 	http.HandleFunc("/host", handleHost)
 	http.HandleFunc("/join", handleJoin)
 	http.HandleFunc("/close", handleClose)
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
 
 	fmt.Println("Server started on :8080")
 	log.Fatal(http.ListenAndServe(":8000", nil))
