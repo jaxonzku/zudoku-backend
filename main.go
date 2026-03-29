@@ -37,8 +37,12 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	fmt.Println("server starting.....")
 	http.HandleFunc("/ws", wsHandler)
-	fmt.Println("websocket server started in : 8080")
-	err := http.ListenAndServe(":8080", nil)
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+	fmt.Println("websocket server started in : 8000")
+	err := http.ListenAndServe(":8000", nil)
 	if err != nil {
 		fmt.Println("error starting server:", err)
 	}
