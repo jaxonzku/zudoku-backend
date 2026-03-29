@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -19,6 +20,10 @@ var upgrader = websocket.Upgrader{
 // Store active WebSocket connections for each game session
 var sessions = make(map[string][]*websocket.Conn)
 var mu sync.Mutex // Mutex to protect sessions map
+
+// Store connections for /all-ws endpoint to send real-time updates
+var allWsConnections = make([]*websocket.Conn, 0)
+var allWsMu sync.Mutex // Mutex to protect allWsConnections
 
 // Create a new host
 func handleHost(w http.ResponseWriter, r *http.Request) {
@@ -39,6 +44,7 @@ func handleHost(w http.ResponseWriter, r *http.Request) {
 	mu.Unlock()
 
 	log.Printf("Host connected to session %s", id)
+	broadcastSessionUpdate()
 	handleMessages(conn, id)
 }
 
@@ -61,6 +67,7 @@ func handleJoin(w http.ResponseWriter, r *http.Request) {
 	mu.Unlock()
 
 	log.Printf("Player joined session %s", id)
+	broadcastSessionUpdate()
 	handleMessages(conn, id)
 }
 
@@ -98,14 +105,54 @@ func broadcastMessage(sessionID string, message []byte) {
 // Remove a connection from the session
 func removeConnection(sessionID string, conn *websocket.Conn) {
 	mu.Lock()
-	defer mu.Unlock()
-
 	conns := sessions[sessionID]
 	for i, c := range conns {
 		if c == conn {
 			sessions[sessionID] = append(conns[:i], conns[i+1:]...)
+			// Clean up empty sessions
+			if len(sessions[sessionID]) == 0 {
+				delete(sessions, sessionID)
+			}
 			break
 		}
+	}
+	mu.Unlock()
+
+	// Broadcast session update outside of lock to avoid deadlock
+	broadcastSessionUpdate()
+}
+
+// Broadcast current session state to all /all-ws connections
+func broadcastSessionUpdate() {
+	mu.Lock()
+	sessionInfo := make(map[string]int)
+	for id, conns := range sessions {
+		sessionInfo[id] = len(conns)
+	}
+	mu.Unlock()
+
+	data, err := json.Marshal(sessionInfo)
+	if err != nil {
+		log.Println("Error marshalling session info:", err)
+		return
+	}
+
+	allWsMu.Lock()
+	defer allWsMu.Unlock()
+
+	// Collect failed connections to remove
+	var failedIndices []int
+	for i, conn := range allWsConnections {
+		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+			log.Println("Write error to /all-ws:", err)
+			failedIndices = append(failedIndices, i)
+		}
+	}
+
+	// Remove failed connections in reverse order to maintain indices
+	for i := len(failedIndices) - 1; i >= 0; i-- {
+		idx := failedIndices[i]
+		allWsConnections = append(allWsConnections[:idx], allWsConnections[idx+1:]...)
 	}
 }
 
@@ -129,14 +176,73 @@ func handleClose(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Game session %s closed", id)
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Game closed"))
+
+		// Broadcast session update
+		go broadcastSessionUpdate()
 	} else {
 		http.Error(w, "Session not found", http.StatusNotFound)
+	}
+}
+
+func all(w http.ResponseWriter, r *http.Request) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Create a map of session IDs to connection counts
+	sessionInfo := make(map[string]int)
+	for id, conns := range sessions {
+		sessionInfo[id] = len(conns)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(sessionInfo)
+}
+
+// WebSocket handler for real-time session updates
+func allWs(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println("All-ws upgrade error:", err)
+		return
+	}
+
+	allWsMu.Lock()
+	allWsConnections = append(allWsConnections, conn)
+	allWsMu.Unlock()
+
+	log.Println("Client connected to /all-ws")
+
+	// Send initial session state
+	broadcastSessionUpdate()
+
+	// Keep connection open and listen for disconnections
+	defer func() {
+		allWsMu.Lock()
+		defer allWsMu.Unlock()
+		for i, c := range allWsConnections {
+			if c == conn {
+				allWsConnections = append(allWsConnections[:i], allWsConnections[i+1:]...)
+				break
+			}
+		}
+		conn.Close()
+		log.Println("Client disconnected from /all-ws")
+	}()
+
+	for {
+		_, _, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
 	}
 }
 
 func main() {
 	http.HandleFunc("/host", handleHost)
 	http.HandleFunc("/join", handleJoin)
+	http.HandleFunc("/all", all)
+	http.HandleFunc("/all-ws", allWs)
+
 	http.HandleFunc("/close", handleClose)
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
