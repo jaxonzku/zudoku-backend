@@ -899,8 +899,8 @@ func main() {
 		}
 	})
 
-	log.Println("multiplayer websocket server starting on :8080")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+	log.Println("multiplayer websocket server starting on :8000")
+	if err := http.ListenAndServe(":8000", nil); err != nil {
 		log.Fatalf("server stopped: %v", err)
 	}
 }
